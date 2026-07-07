@@ -113,6 +113,7 @@ serve(async (req) => {
       documentType?: string;
       additionalInstructions?: string;
       opponentPlaintText?: string;
+      language?: string;
     };
     try {
       body = await req.json();
@@ -123,7 +124,7 @@ serve(async (req) => {
       });
     }
 
-    const { caseId, documentType, additionalInstructions, opponentPlaintText } = body;
+    const { caseId, documentType, additionalInstructions, opponentPlaintText, language } = body;
 
     if (!documentType || typeof documentType !== "string" || documentType.length > 200) {
       return new Response(JSON.stringify({ error: "Invalid input: documentType is required" }), {
@@ -233,18 +234,25 @@ FORMATTING: Structure your output using this exact lightweight markup so it can 
 - Separate paragraphs with a blank line. Number paragraphs manually where appropriate (e.g. "1. ...", "2. ...").
 - For any tabular information (e.g. schedule of properties, list of dates/hearings, list of documents/exhibits), use a markdown table: a header row, then a separator row of dashes, then data rows, with "|" separating columns.`;
 
+    // Language is a drafting instruction only, not a pre-translation step - the
+    // model drafts directly in the target language, same approach as
+    // ai-legal-assistant. English stays the implicit default.
+    const languageInstruction = language && language !== "en"
+      ? `\n\nDraft the entire document in ${language} (ISO language code), including all headings and boilerplate. Keep case names, statute citations, and party names in their original form even if the surrounding text is translated.`
+      : "";
+
     let systemPrompt: string;
     let userPrompt: string;
 
     if (documentType === "Written Statement") {
-      systemPrompt = `You are an expert Indian legal drafting assistant. Draft a complete, properly formatted Written Statement in response to the opponent's Plaint provided below, under Indian civil procedure. Address each paragraph of the opponent's plaint point-by-point (admit/deny/state facts), raise preliminary objections where applicable, and include a prayer clause and verification clause. Use formal, precise legal language.${formattingInstruction}${citationInstruction}`;
+      systemPrompt = `You are an expert Indian legal drafting assistant. Draft a complete, properly formatted Written Statement in response to the opponent's Plaint provided below, under Indian civil procedure. Address each paragraph of the opponent's plaint point-by-point (admit/deny/state facts), raise preliminary objections where applicable, and include a prayer clause and verification clause. Use formal, precise legal language.${formattingInstruction}${citationInstruction}${languageInstruction}`;
       userPrompt = `${caseContext ? caseContext + "\n\n" : ""}OPPONENT'S PLAINT:
 ${sanitize(opponentPlaintText, 50000)}
 ${additionalInstructions ? `\nADDITIONAL INSTRUCTIONS:\n${sanitize(additionalInstructions, 5000)}` : ""}
 
 Draft the complete Written Statement now.`;
     } else {
-      systemPrompt = `You are an expert Indian legal drafting assistant. Draft a complete, properly formatted ${documentType} under Indian civil/criminal procedure — including cause-title, numbered paragraphs, prayer clause, and verification clause as applicable. Use formal, precise legal language appropriate for the jurisdiction implied by the case details.${formattingInstruction}${citationInstruction}`;
+      systemPrompt = `You are an expert Indian legal drafting assistant. Draft a complete, properly formatted ${documentType} under Indian civil/criminal procedure — including cause-title, numbered paragraphs, prayer clause, and verification clause as applicable. Use formal, precise legal language appropriate for the jurisdiction implied by the case details.${formattingInstruction}${citationInstruction}${languageInstruction}`;
       userPrompt = `${caseContext ? caseContext + "\n\n" : ""}${additionalInstructions ? `ADDITIONAL INSTRUCTIONS:\n${sanitize(additionalInstructions, 5000)}\n\n` : ""}Draft the complete ${documentType} now.`;
     }
 
@@ -367,12 +375,16 @@ Draft the complete Written Statement now.`;
       // Citation recall failing should not block returning the drafted document
     }
 
+    const disclaimer = languageInstruction
+      ? `${DISCLAIMER} This document was also drafted directly in a non-English language — legal terminology accuracy in translation should be independently verified by a qualified advocate.`
+      : DISCLAIMER;
+
     return new Response(
       JSON.stringify({
         document: draftedDocument,
         documentType,
         citations,
-        disclaimer: DISCLAIMER,
+        disclaimer,
         timestamp: new Date().toISOString(),
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }

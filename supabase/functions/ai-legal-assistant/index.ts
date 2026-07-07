@@ -98,7 +98,7 @@ serve(async (req) => {
 
     const userId = claimsData.claims.sub as string;
 
-    const { messages, conversationId, caseId } = await req.json();
+    const { messages, conversationId, caseId, language } = await req.json();
 
     if (!messages || !Array.isArray(messages)) {
       return new Response(JSON.stringify({ error: "Invalid request: messages array required" }), {
@@ -141,9 +141,16 @@ serve(async (req) => {
       }
     }
 
+    // If the user has selected a non-English language, instruct the model to
+    // respond in it. No pre-translation needed - the model natively supports
+    // a very wide range of languages given a plain instruction like this.
+    const languageInstruction = language && language !== "en"
+      ? `\n\nRespond in ${language} (ISO language code). Keep legal terminology precise; if a term is more standard in English, you may include the English term in parentheses.`
+      : "";
+
     // Prepare messages with system prompt
     const aiMessages = [
-      { role: "system", content: SYSTEM_PROMPT + caseContext },
+      { role: "system", content: SYSTEM_PROMPT + caseContext + languageInstruction },
       ...messages,
     ];
 
