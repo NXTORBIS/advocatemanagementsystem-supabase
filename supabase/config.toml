@@ -1,0 +1,31 @@
+project_id = "qzpdleqmcyiqcljjeths"
+
+[functions.generate-legal-document]
+verify_jwt = false
+
+[functions.process-notification]
+verify_jwt = false
+
+[functions.search-similar-cases]
+verify_jwt = false
+
+[functions.send-email-notification]
+verify_jwt = false
+
+[functions.send-sms-notification]
+verify_jwt = false
+
+[functions.send-whatsapp-notification]
+verify_jwt = false
+
+[functions.ai-legal-assistant]
+verify_jwt = false
+
+[functions.extract-case-insights]
+verify_jwt = false
+
+[functions.draft-legal-document]
+verify_jwt = false
+
+[functions.summarize-dictation]
+verify_jwt = false
