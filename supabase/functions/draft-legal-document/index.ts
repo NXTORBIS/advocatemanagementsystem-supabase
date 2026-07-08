@@ -183,12 +183,16 @@ serve(async (req) => {
 
     const { data: partyRows } = await supabase
       .from("parties")
-      .select("name, type, role, contact, email, address, mobile, profession")
+      .select("name, type, role, contact, email, address, mobile, profession, guardian_relation, guardian_name")
       .eq("case_id", caseId)
       .limit(40);
 
-    const formatParty = (p: Record<string, unknown>) =>
-      `- ${sanitize(p.name, 200)}${p.role ? ` (${sanitize(p.role, 100)})` : ""} — Address: ${sanitize(p.address, 300)}, Contact: ${sanitize(p.contact || p.mobile, 50)}, Email: ${sanitize(p.email, 200)}`;
+    const formatParty = (p: Record<string, unknown>) => {
+      const guardianPart = p.guardian_name
+        ? ` ${sanitize(p.guardian_relation, 10)} ${sanitize(p.guardian_name, 200)}`
+        : "";
+      return `- ${sanitize(p.name, 200)}${guardianPart}${p.role ? ` (${sanitize(p.role, 100)})` : ""} — Address: ${sanitize(p.address, 300)}, Contact: ${sanitize(p.contact || p.mobile, 50)}, Email: ${sanitize(p.email, 200)}`;
+    };
 
     const petitioners = (partyRows || []).filter((p) => p.type === "petitioner").slice(0, 20);
     const respondents = (partyRows || []).filter((p) => p.type === "respondent").slice(0, 20);
