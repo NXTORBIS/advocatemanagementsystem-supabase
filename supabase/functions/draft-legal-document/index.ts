@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { getDocFragment, indianKanoonDocUrl, isIndianKanoonConfigured, searchIndianKanoon, stripHtml } from "../_shared/indianKanoon.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -9,7 +10,7 @@ const corsHeaders = {
 const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const DISCLAIMER_WITH_CITATIONS =
-  "This document was AI-drafted and includes AI-recalled case citations that are UNVERIFIED against any legal database. A qualified advocate must review all content and citations before filing.";
+  "This document was AI-drafted. Supporting case law citations were retrieved from Indian Kanoon's real case database (not AI-recalled), but relevance and summaries were AI-generated — a qualified advocate must review all content and citations before filing.";
 const DISCLAIMER_NO_CITATIONS =
   "This document was AI-drafted. A qualified advocate must review all content before filing.";
 
@@ -232,13 +233,12 @@ ${(opponentRows || []).length > 0
       .join("\n")
   : "None on file"}`;
 
-    const citationInstruction = includeCitations
-      ? `
+    // Supporting case law (when requested) is looked up separately via
+    // Indian Kanoon search after drafting - never let the draft body itself
+    // contain AI-recalled case names, since those would be unverified.
+    const citationInstruction = `
 
-CASE LAW: Where you reference supporting case law, insert inline markers like "[AI-Recalled, Unverified: <case name>]" immediately after the reference. These citations are recalled from your training data, are NOT verified against any live legal database, and may be inaccurate, outdated, or fabricated — never present them as verified fact.`
-      : `
-
-CASE LAW: Do not reference or cite any specific case law, judgments, or precedents in this draft.`;
+CASE LAW: Do not reference or cite specific case law, judgments, or precedents by name within the drafted document itself. Any supporting case law is supplied separately from a verified source.`;
 
     const formattingInstruction = `
 
@@ -303,94 +303,162 @@ Draft the complete Written Statement now.`;
       });
     }
 
-    // --- Call #2: recall supporting case law via forced tool call ---
+    // --- Call #2: find supporting case law via Indian Kanoon search, not AI recall ---
+    // Bounded pipeline (not an open-ended agent loop): generate a few search
+    // queries -> search Indian Kanoon -> fetch a matching excerpt per
+    // candidate -> ask the model to select/rank up to 5 BY INDEX. The model
+    // never invents case names/citations - those come straight from Indian
+    // Kanoon's real search results, keyed back by index, so the only thing
+    // the model contributes is relevance judgement and excerpt summarizing.
     interface Citation {
       caseName: string;
       citationText: string;
-      court?: string;
-      year?: string;
       summary?: string;
-      keyPrinciples?: string;
       relevance?: string;
       points: string[];
+      sourceUrl?: string;
     }
     let citations: Citation[] = [];
-    if (includeCitations) try {
-      const citationsResponse = await callChatCompletion({
-        messages: [
-          {
-            role: "system",
-            content: "You are a legal research assistant. Recall up to 5 relevant Supreme Court of India / High Court precedents that support the draft legal document provided. These are recalled from training data and are NOT verified — do not fabricate beyond what you can plausibly recall, and return fewer than 5 (or none) if you are not reasonably confident.",
-          },
-          {
-            role: "user",
-            content: `Recall relevant precedents for this drafted ${documentType}:\n\n${draftedDocument.substring(0, 12000)}`,
-          },
-        ],
-        tools: [
-          {
-            type: "function",
-            function: {
-              name: "save_citations",
-              description: "Return up to 5 recalled case law citations relevant to the draft",
-              parameters: {
-                type: "object",
-                properties: {
-                  citations: {
-                    type: "array",
-                    maxItems: 5,
-                    items: {
-                      type: "object",
-                      properties: {
-                        caseName: { type: "string", description: "Case name/title" },
-                        citationText: { type: "string", description: "Legal citation (e.g. AIR, SCC)" },
-                        court: { type: "string", description: "Court name (e.g., Supreme Court of India)" },
-                        year: { type: "string", description: "Year of judgment" },
-                        summary: { type: "string", description: "Brief summary of the judgment" },
-                        keyPrinciples: { type: "string", description: "Key legal principles established" },
-                        relevance: { type: "string", description: "How this precedent supports the draft" },
-                        points: {
-                          type: "array",
-                          items: { type: "string" },
-                          description: "Key point bullets",
-                        },
-                      },
-                      required: ["caseName", "citationText", "points"],
-                      additionalProperties: false,
-                    },
-                  },
-                },
-                required: ["citations"],
-                additionalProperties: false,
-              },
+    if (includeCitations && isIndianKanoonConfigured()) {
+      try {
+        const queryResponse = await callChatCompletion({
+          messages: [
+            {
+              role: "system",
+              content: "Generate up to 4 short Indian Kanoon search queries (a few keywords each) that would find real Indian case law relevant to the legal issues in the drafted document below. Return ONLY a JSON array of strings, nothing else.",
             },
-          },
-        ],
-        tool_choice: { type: "function", function: { name: "save_citations" } },
-      });
+            { role: "user", content: draftedDocument.substring(0, 8000) },
+          ],
+          temperature: 0.3,
+        });
 
-      if (citationsResponse.ok) {
-        const citationsData = await citationsResponse.json();
-        const toolCall = citationsData.choices?.[0]?.message?.tool_calls?.[0];
-        if (toolCall) {
+        let queries: string[] = [];
+        if (queryResponse.ok) {
+          const qData = await queryResponse.json();
+          const content: string = qData.choices?.[0]?.message?.content || "[]";
           try {
-            const parsed = JSON.parse(toolCall.function.arguments);
-            if (Array.isArray(parsed.citations)) {
-              citations = parsed.citations.slice(0, 5);
+            const match = content.match(/\[[\s\S]*\]/);
+            const parsed = JSON.parse(match ? match[0] : "[]");
+            if (Array.isArray(parsed)) {
+              queries = parsed.filter((q) => typeof q === "string" && q.trim()).slice(0, 4);
             }
           } catch (parseErr) {
-            console.error("Failed to parse citations tool call:", parseErr);
+            console.error("Failed to parse search query list:", parseErr);
           }
         }
-      } else {
-        console.error("Citation recall error:", citationsResponse.status, await citationsResponse.text());
+
+        const seen = new Set<string>();
+        const candidates: { tid: string; title: string; headline: string; docsource: string }[] = [];
+        for (const q of queries) {
+          try {
+            const docs = await searchIndianKanoon(q, 3);
+            for (const d of docs) {
+              const tid = String(d.tid);
+              if (!seen.has(tid)) {
+                seen.add(tid);
+                candidates.push({ tid, title: stripHtml(d.title), headline: stripHtml(d.headline), docsource: d.docsource || "" });
+              }
+            }
+          } catch (err) {
+            console.error("Indian Kanoon search failed for query:", q, err);
+          }
+        }
+        const topCandidates = candidates.slice(0, 8);
+
+        const withFragments = await Promise.all(
+          topCandidates.map(async (c) => {
+            try {
+              const fragment = await getDocFragment(c.tid, queries[0] || c.title);
+              return { ...c, fragment: fragment || c.headline };
+            } catch {
+              return { ...c, fragment: c.headline };
+            }
+          })
+        );
+
+        if (withFragments.length > 0) {
+          const selectionResponse = await callChatCompletion({
+            messages: [
+              {
+                role: "system",
+                content: "You are a legal research assistant. From the numbered list of real, verified Indian Kanoon search results below, select up to 5 that are genuinely relevant to the drafted document. Reference each by its index only - do not restate or alter the case name/citation. Extract key points and relevance strictly from the given excerpt; do not add outside knowledge.",
+              },
+              {
+                role: "user",
+                content: `DRAFT:\n${draftedDocument.substring(0, 8000)}\n\nCANDIDATE CASES (verified via Indian Kanoon):\n${withFragments.map((c, i) => `${i + 1}. ${c.title} (${c.docsource})\nExcerpt: ${c.fragment}`).join("\n\n")}`,
+              },
+            ],
+            tools: [
+              {
+                type: "function",
+                function: {
+                  name: "select_citations",
+                  description: "Select up to 5 relevant candidate cases by index",
+                  parameters: {
+                    type: "object",
+                    properties: {
+                      selections: {
+                        type: "array",
+                        maxItems: 5,
+                        items: {
+                          type: "object",
+                          properties: {
+                            index: { type: "integer", description: "1-based index of the candidate case being selected" },
+                            relevance: { type: "string", description: "How this case supports the draft" },
+                            points: { type: "array", items: { type: "string" }, description: "Key point bullets from the excerpt" },
+                          },
+                          required: ["index", "relevance", "points"],
+                          additionalProperties: false,
+                        },
+                      },
+                    },
+                    required: ["selections"],
+                    additionalProperties: false,
+                  },
+                },
+              },
+            ],
+            tool_choice: { type: "function", function: { name: "select_citations" } },
+          });
+
+          if (selectionResponse.ok) {
+            const selData = await selectionResponse.json();
+            const toolCall = selData.choices?.[0]?.message?.tool_calls?.[0];
+            if (toolCall) {
+              try {
+                const parsed = JSON.parse(toolCall.function.arguments);
+                if (Array.isArray(parsed.selections)) {
+                  citations = parsed.selections
+                    .map((s: { index: number; relevance?: string; points?: string[] }) => {
+                      const candidate = withFragments[s.index - 1];
+                      if (!candidate) return null;
+                      return {
+                        caseName: candidate.title,
+                        citationText: candidate.docsource,
+                        summary: candidate.fragment,
+                        relevance: s.relevance,
+                        points: Array.isArray(s.points) ? s.points.slice(0, 8) : [],
+                        sourceUrl: indianKanoonDocUrl(candidate.tid),
+                      } as Citation;
+                    })
+                    .filter((c): c is Citation => c !== null)
+                    .slice(0, 5);
+                }
+              } catch (parseErr) {
+                console.error("Failed to parse citation selection:", parseErr);
+              }
+            }
+          } else {
+            console.error("Citation selection error:", selectionResponse.status, await selectionResponse.text());
+          }
+        }
+      } catch (err) {
+        console.error("Indian Kanoon citation pipeline failed:", err);
+        // Citation lookup failing should not block returning the drafted document
       }
-    } catch (err) {
-      console.error("Error calling AI provider for citation recall:", err);
-      // Citation recall failing should not block returning the drafted document
     }
 
-    const baseDisclaimer = includeCitations ? DISCLAIMER_WITH_CITATIONS : DISCLAIMER_NO_CITATIONS;
+    const baseDisclaimer = citations.length > 0 ? DISCLAIMER_WITH_CITATIONS : DISCLAIMER_NO_CITATIONS;
     const disclaimer = languageInstruction
       ? `${baseDisclaimer} This document was also drafted directly in a non-English language — legal terminology accuracy in translation should be independently verified by a qualified advocate.`
       : baseDisclaimer;
@@ -401,6 +469,7 @@ Draft the complete Written Statement now.`;
         documentType,
         citations,
         citationsIncluded: !!includeCitations,
+        citationsUnavailable: !!includeCitations && !isIndianKanoonConfigured(),
         disclaimer,
         timestamp: new Date().toISOString(),
       }),

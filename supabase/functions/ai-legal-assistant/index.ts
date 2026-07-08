@@ -1,5 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { getDocFragment, indianKanoonDocUrl, isIndianKanoonConfigured, searchIndianKanoon, stripHtml } from "../_shared/indianKanoon.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -118,7 +119,7 @@ serve(async (req) => {
 
     const userId = claimsData.claims.sub as string;
 
-    const { messages, conversationId, caseId, language } = await req.json();
+    const { messages, conversationId, caseId, language, groundInCaseLaw } = await req.json();
 
     if (!messages || !Array.isArray(messages)) {
       return new Response(JSON.stringify({ error: "Invalid request: messages array required" }), {
@@ -168,9 +169,93 @@ serve(async (req) => {
       ? `\n\nRespond in ${language} (ISO language code). Keep legal terminology precise; if a term is more standard in English, you may include the English term in parentheses.`
       : "";
 
+    // Opt-in only (explicit per-message checkbox on the frontend) - grounds
+    // this response in real Indian Kanoon search results before the main
+    // streaming call, rather than letting the model recall case law from
+    // memory. Adds latency/cost only when requested, never by default.
+    let caseLawContext = "";
+    if (groundInCaseLaw && isIndianKanoonConfigured()) {
+      try {
+        const lastUserMessage = [...messages].reverse().find((m: { role: string }) => m.role === "user")?.content || "";
+        const queryResponse = await fetch(PROVIDER_ENDPOINTS[provider], {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${PROVIDER_KEY[provider]}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: AI_MODEL || PROVIDER_DEFAULT_MODEL[provider],
+            messages: [
+              {
+                role: "system",
+                content: "Generate up to 3 short Indian Kanoon search queries (a few keywords each) that would find real Indian case law relevant to the user's legal question below. Return ONLY a JSON array of strings, nothing else.",
+              },
+              { role: "user", content: String(lastUserMessage).substring(0, 2000) },
+            ],
+            temperature: 0.3,
+          }),
+        });
+
+        let queries: string[] = [];
+        if (queryResponse.ok) {
+          const qData = await queryResponse.json();
+          const content: string = qData.choices?.[0]?.message?.content || "[]";
+          const match = content.match(/\[[\s\S]*\]/);
+          try {
+            const parsed = JSON.parse(match ? match[0] : "[]");
+            if (Array.isArray(parsed)) {
+              queries = parsed.filter((q) => typeof q === "string" && q.trim()).slice(0, 3);
+            }
+          } catch (parseErr) {
+            console.error("Failed to parse case law search queries:", parseErr);
+          }
+        }
+
+        const seen = new Set<string>();
+        const candidates: { tid: string; title: string; headline: string; docsource: string }[] = [];
+        for (const q of queries) {
+          try {
+            const docs = await searchIndianKanoon(q, 3);
+            for (const d of docs) {
+              const tid = String(d.tid);
+              if (!seen.has(tid)) {
+                seen.add(tid);
+                candidates.push({ tid, title: stripHtml(d.title), headline: stripHtml(d.headline), docsource: d.docsource || "" });
+              }
+            }
+          } catch (err) {
+            console.error("Indian Kanoon search failed for query:", q, err);
+          }
+        }
+        const topCandidates = candidates.slice(0, 6);
+
+        const withFragments = await Promise.all(
+          topCandidates.map(async (c) => {
+            try {
+              const fragment = await getDocFragment(c.tid, queries[0] || c.title);
+              return { ...c, fragment: fragment || c.headline };
+            } catch {
+              return { ...c, fragment: c.headline };
+            }
+          })
+        );
+
+        if (withFragments.length > 0) {
+          caseLawContext = `\n\nVERIFIED CASE LAW (retrieved from Indian Kanoon - real, not AI-recalled):\n${withFragments
+            .map((c, i) => `${i + 1}. ${c.title} (${c.docsource}) — ${indianKanoonDocUrl(c.tid)}\n   Excerpt: ${c.fragment}`)
+            .join("\n\n")}\n\nWhen referencing case law in your response, ONLY cite from the verified list above, include the doc link, and clearly mark it as "Verified via Indian Kanoon." Do not recall or cite any other case law from memory for this response. If none of the verified cases are actually relevant, say so explicitly rather than substituting unverified recollections.`;
+        } else {
+          caseLawContext = `\n\nNo verified case law was found via Indian Kanoon search for this question. Do not recall or cite case law from memory for this response — state that no verified precedent was found instead.`;
+        }
+      } catch (err) {
+        console.error("Indian Kanoon grounding failed:", err);
+        // Grounding failing should not block the normal response
+      }
+    }
+
     // Prepare messages with system prompt
     const aiMessages = [
-      { role: "system", content: SYSTEM_PROMPT + caseContext + languageInstruction },
+      { role: "system", content: SYSTEM_PROMPT + caseContext + caseLawContext + languageInstruction },
       ...messages,
     ];
 
