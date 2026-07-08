@@ -10,8 +10,28 @@ const corsHeaders = {
 // Prefers whichever key is configured; AI_PROVIDER env var can force a choice.
 const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
+const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
 const AI_MODEL = Deno.env.get("AI_MODEL");
-const provider = Deno.env.get("AI_PROVIDER") ?? (LOVABLE_API_KEY ? "lovable" : OPENAI_API_KEY ? "openai" : undefined);
+const provider = Deno.env.get("AI_PROVIDER") ??
+  (LOVABLE_API_KEY ? "lovable" : OPENAI_API_KEY ? "openai" : GEMINI_API_KEY ? "gemini" : undefined);
+
+const PROVIDER_ENDPOINTS: Record<string, string> = {
+  lovable: "https://ai.gateway.lovable.dev/v1/chat/completions",
+  openai: "https://api.openai.com/v1/chat/completions",
+  gemini: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+};
+
+const PROVIDER_DEFAULT_MODEL: Record<string, string> = {
+  lovable: "google/gemini-3-flash-preview",
+  openai: "gpt-4o-mini",
+  gemini: "gemini-2.5-flash",
+};
+
+const PROVIDER_KEY: Record<string, string | undefined> = {
+  lovable: LOVABLE_API_KEY,
+  openai: OPENAI_API_KEY,
+  gemini: GEMINI_API_KEY,
+};
 
 serve(async (req) => {
   if (req.method === "OPTIONS") {
@@ -63,7 +83,7 @@ serve(async (req) => {
     }
 
     if (!provider) {
-      throw new Error("No AI provider configured: set LOVABLE_API_KEY or OPENAI_API_KEY");
+      throw new Error("No AI provider configured: set LOVABLE_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY");
     }
 
     // Fetch case context using RLS-scoped client (only returns user's own cases)
@@ -80,18 +100,14 @@ serve(async (req) => {
     console.log("Extracting insights for case:", caseId, "user:", userId);
 
     // Use AI tool calling to extract structured insights
-    const extractionResponse = await fetch(
-      provider === "lovable"
-        ? "https://ai.gateway.lovable.dev/v1/chat/completions"
-        : "https://api.openai.com/v1/chat/completions",
-      {
+    const extractionResponse = await fetch(PROVIDER_ENDPOINTS[provider], {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${provider === "lovable" ? LOVABLE_API_KEY : OPENAI_API_KEY}`,
+        Authorization: `Bearer ${PROVIDER_KEY[provider]}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: AI_MODEL || (provider === "lovable" ? "google/gemini-3-flash-preview" : "gpt-4o-mini"),
+        model: AI_MODEL || PROVIDER_DEFAULT_MODEL[provider],
         messages: [
           {
             role: "system",

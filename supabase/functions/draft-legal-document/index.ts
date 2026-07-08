@@ -15,8 +15,28 @@ const DISCLAIMER =
 // Prefers whichever key is configured; AI_PROVIDER env var can force a choice.
 const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
+const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
 const AI_MODEL = Deno.env.get("AI_MODEL");
-const provider = Deno.env.get("AI_PROVIDER") ?? (LOVABLE_API_KEY ? "lovable" : OPENAI_API_KEY ? "openai" : undefined);
+const provider = Deno.env.get("AI_PROVIDER") ??
+  (LOVABLE_API_KEY ? "lovable" : OPENAI_API_KEY ? "openai" : GEMINI_API_KEY ? "gemini" : undefined);
+
+const PROVIDER_ENDPOINTS: Record<string, string> = {
+  lovable: "https://ai.gateway.lovable.dev/v1/chat/completions",
+  openai: "https://api.openai.com/v1/chat/completions",
+  gemini: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+};
+
+const PROVIDER_DEFAULT_MODEL: Record<string, string> = {
+  lovable: "google/gemini-2.5-pro",
+  openai: "gpt-4o",
+  gemini: "gemini-2.5-flash",
+};
+
+const PROVIDER_KEY: Record<string, string | undefined> = {
+  lovable: LOVABLE_API_KEY,
+  openai: OPENAI_API_KEY,
+  gemini: GEMINI_API_KEY,
+};
 
 interface ChatMessage {
   role: "system" | "user" | "assistant";
@@ -31,30 +51,14 @@ interface ChatCompletionOptions {
 }
 
 async function callChatCompletion(opts: ChatCompletionOptions): Promise<Response> {
-  if (provider === "lovable") {
-    return fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${LOVABLE_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: AI_MODEL || "google/gemini-2.5-pro",
-        messages: opts.messages,
-        ...(opts.tools ? { tools: opts.tools, tool_choice: opts.tool_choice } : {}),
-        ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
-      }),
-    });
-  }
-
-  return fetch("https://api.openai.com/v1/chat/completions", {
+  return fetch(PROVIDER_ENDPOINTS[provider!], {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      Authorization: `Bearer ${PROVIDER_KEY[provider!]}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: AI_MODEL || "gpt-4o",
+      model: AI_MODEL || PROVIDER_DEFAULT_MODEL[provider!],
       messages: opts.messages,
       ...(opts.tools ? { tools: opts.tools, tool_choice: opts.tool_choice } : {}),
       ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
@@ -100,7 +104,7 @@ serve(async (req) => {
     }
 
     if (!provider) {
-      console.error("No AI provider configured (missing LOVABLE_API_KEY and OPENAI_API_KEY)");
+      console.error("No AI provider configured (missing LOVABLE_API_KEY, OPENAI_API_KEY, and GEMINI_API_KEY)");
       return new Response(JSON.stringify({ error: "AI configuration error. Please contact support." }), {
         status: 500,
         headers: { ...corsHeaders, "Content-Type": "application/json" },

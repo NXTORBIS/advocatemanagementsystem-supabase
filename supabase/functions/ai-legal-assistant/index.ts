@@ -10,8 +10,28 @@ const corsHeaders = {
 // Prefers whichever key is configured; AI_PROVIDER env var can force a choice.
 const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
+const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY");
 const AI_MODEL = Deno.env.get("AI_MODEL");
-const provider = Deno.env.get("AI_PROVIDER") ?? (LOVABLE_API_KEY ? "lovable" : OPENAI_API_KEY ? "openai" : undefined);
+const provider = Deno.env.get("AI_PROVIDER") ??
+  (LOVABLE_API_KEY ? "lovable" : OPENAI_API_KEY ? "openai" : GEMINI_API_KEY ? "gemini" : undefined);
+
+const PROVIDER_ENDPOINTS: Record<string, string> = {
+  lovable: "https://ai.gateway.lovable.dev/v1/chat/completions",
+  openai: "https://api.openai.com/v1/chat/completions",
+  gemini: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+};
+
+const PROVIDER_DEFAULT_MODEL: Record<string, string> = {
+  lovable: "google/gemini-2.5-pro",
+  openai: "gpt-4o",
+  gemini: "gemini-2.5-flash",
+};
+
+const PROVIDER_KEY: Record<string, string | undefined> = {
+  lovable: LOVABLE_API_KEY,
+  openai: OPENAI_API_KEY,
+  gemini: GEMINI_API_KEY,
+};
 
 const SYSTEM_PROMPT = `You are an AI Legal Assistant integrated into an Advocate Management Application. You answer legal questions using documents when available and general legal knowledge when documents are not provided.
 
@@ -108,7 +128,7 @@ serve(async (req) => {
     }
 
     if (!provider) {
-      throw new Error("No AI provider configured: set LOVABLE_API_KEY or OPENAI_API_KEY");
+      throw new Error("No AI provider configured: set LOVABLE_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY");
     }
 
     // If we have case context, fetch case details using RLS-scoped client
@@ -156,23 +176,18 @@ serve(async (req) => {
 
     console.log("Sending request to AI gateway with", aiMessages.length, "messages for user", userId);
 
-    const response = await fetch(
-      provider === "lovable"
-        ? "https://ai.gateway.lovable.dev/v1/chat/completions"
-        : "https://api.openai.com/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${provider === "lovable" ? LOVABLE_API_KEY : OPENAI_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: AI_MODEL || (provider === "lovable" ? "google/gemini-2.5-pro" : "gpt-4o"),
-          messages: aiMessages,
-          stream: true,
-        }),
-      }
-    );
+    const response = await fetch(PROVIDER_ENDPOINTS[provider], {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${PROVIDER_KEY[provider]}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: AI_MODEL || PROVIDER_DEFAULT_MODEL[provider],
+        messages: aiMessages,
+        stream: true,
+      }),
+    });
 
     if (!response.ok) {
       if (response.status === 429) {
