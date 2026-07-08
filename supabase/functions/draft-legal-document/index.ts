@@ -8,8 +8,10 @@ const corsHeaders = {
 
 const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-const DISCLAIMER =
+const DISCLAIMER_WITH_CITATIONS =
   "This document was AI-drafted and includes AI-recalled case citations that are UNVERIFIED against any legal database. A qualified advocate must review all content and citations before filing.";
+const DISCLAIMER_NO_CITATIONS =
+  "This document was AI-drafted. A qualified advocate must review all content before filing.";
 
 // --- AI provider abstraction ---
 // Prefers whichever key is configured; AI_PROVIDER env var can force a choice.
@@ -118,6 +120,7 @@ serve(async (req) => {
       additionalInstructions?: string;
       opponentPlaintText?: string;
       language?: string;
+      includeCitations?: boolean;
     };
     try {
       body = await req.json();
@@ -128,7 +131,7 @@ serve(async (req) => {
       });
     }
 
-    const { caseId, documentType, additionalInstructions, opponentPlaintText, language } = body;
+    const { caseId, documentType, additionalInstructions, opponentPlaintText, language, includeCitations } = body;
 
     if (!documentType || typeof documentType !== "string" || documentType.length > 200) {
       return new Response(JSON.stringify({ error: "Invalid input: documentType is required" }), {
@@ -229,9 +232,13 @@ ${(opponentRows || []).length > 0
       .join("\n")
   : "None on file"}`;
 
-    const citationInstruction = `
+    const citationInstruction = includeCitations
+      ? `
 
-CASE LAW: Where you reference supporting case law, insert inline markers like "[AI-Recalled, Unverified: <case name>]" immediately after the reference. These citations are recalled from your training data, are NOT verified against any live legal database, and may be inaccurate, outdated, or fabricated — never present them as verified fact.`;
+CASE LAW: Where you reference supporting case law, insert inline markers like "[AI-Recalled, Unverified: <case name>]" immediately after the reference. These citations are recalled from your training data, are NOT verified against any live legal database, and may be inaccurate, outdated, or fabricated — never present them as verified fact.`
+      : `
+
+CASE LAW: Do not reference or cite any specific case law, judgments, or precedents in this draft.`;
 
     const formattingInstruction = `
 
@@ -308,7 +315,7 @@ Draft the complete Written Statement now.`;
       points: string[];
     }
     let citations: Citation[] = [];
-    try {
+    if (includeCitations) try {
       const citationsResponse = await callChatCompletion({
         messages: [
           {
@@ -383,15 +390,17 @@ Draft the complete Written Statement now.`;
       // Citation recall failing should not block returning the drafted document
     }
 
+    const baseDisclaimer = includeCitations ? DISCLAIMER_WITH_CITATIONS : DISCLAIMER_NO_CITATIONS;
     const disclaimer = languageInstruction
-      ? `${DISCLAIMER} This document was also drafted directly in a non-English language — legal terminology accuracy in translation should be independently verified by a qualified advocate.`
-      : DISCLAIMER;
+      ? `${baseDisclaimer} This document was also drafted directly in a non-English language — legal terminology accuracy in translation should be independently verified by a qualified advocate.`
+      : baseDisclaimer;
 
     return new Response(
       JSON.stringify({
         document: draftedDocument,
         documentType,
         citations,
+        citationsIncluded: !!includeCitations,
         disclaimer,
         timestamp: new Date().toISOString(),
       }),
